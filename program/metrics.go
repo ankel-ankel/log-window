@@ -13,11 +13,10 @@ type latencyMetrics struct {
 	ingestedRecords atomic.Uint64
 	lastEventTimeNs atomic.Int64
 
-	mu              sync.Mutex
-	rateCounter     int64
-	rateLastBucket  int64
-	rateBuckets     *int64Ring
-	refreshDurationNs *int64Ring
+	mu             sync.Mutex
+	rateCounter    int64
+	rateLastBucket int64
+	rateBuckets    *int64Ring
 }
 
 func newLatencyMetrics(window int) *latencyMetrics {
@@ -25,8 +24,7 @@ func newLatencyMetrics(window int) *latencyMetrics {
 		window = 16
 	}
 	return &latencyMetrics{
-		rateBuckets:       newInt64Ring(window),
-		refreshDurationNs: newInt64Ring(window),
+		rateBuckets: newInt64Ring(window),
 	}
 }
 
@@ -48,6 +46,14 @@ func (m *latencyMetrics) observeIngest(now time.Time) {
 	} else {
 		if m.rateLastBucket > 0 {
 			m.rateBuckets.add(m.rateCounter)
+			// fill zeros for any idle seconds between last activity and now
+			idle := bucket - m.rateLastBucket - 1
+			if idle > int64(len(m.rateBuckets.buf)) {
+				idle = int64(len(m.rateBuckets.buf))
+			}
+			for i := int64(0); i < idle; i++ {
+				m.rateBuckets.add(0)
+			}
 		}
 		m.rateLastBucket = bucket
 		m.rateCounter = 1
@@ -61,20 +67,10 @@ func (m *latencyMetrics) observeEventTime(t time.Time) {
 	}
 }
 
-func (m *latencyMetrics) observeRefreshDuration(d time.Duration) {
-	if !m.enabled.Load() {
-		return
-	}
-	m.mu.Lock()
-	m.refreshDurationNs.add(int64(d))
-	m.mu.Unlock()
-}
-
 type snapshot struct {
 	records       uint64
 	ingestRps     int64
 	lastEventTime time.Time
-	refreshP95    time.Duration
 }
 
 func (m *latencyMetrics) snapshot() snapshot {
@@ -86,8 +82,7 @@ func (m *latencyMetrics) snapshot() snapshot {
 	lastEventNs := m.lastEventTimeNs.Load()
 
 	m.mu.Lock()
-	rps := medianRate(m.rateBuckets)
-	refreshP95, _ := percentile95(m.refreshDurationNs)
+	rps := m.currentRate()
 	m.mu.Unlock()
 
 	var lastEventTime time.Time
@@ -99,8 +94,30 @@ func (m *latencyMetrics) snapshot() snapshot {
 		records:       records,
 		ingestRps:     rps,
 		lastEventTime: lastEventTime,
-		refreshP95:    refreshP95,
 	}
+}
+
+// currentRate returns the median rate including the current in-progress second
+// and any idle seconds since the last activity. Called with m.mu held.
+func (m *latencyMetrics) currentRate() int64 {
+	if m.rateLastBucket == 0 {
+		return 0
+	}
+	// Copy ring so we don't mutate the real one.
+	r := &int64Ring{
+		buf:   append([]int64(nil), m.rateBuckets.buf...),
+		idx:   m.rateBuckets.idx,
+		count: m.rateBuckets.count,
+	}
+	r.add(m.rateCounter)
+	idle := time.Now().Unix() - m.rateLastBucket - 1
+	if idle > int64(len(r.buf)) {
+		idle = int64(len(r.buf))
+	}
+	for i := int64(0); i < idle; i++ {
+		r.add(0)
+	}
+	return medianRate(r)
 }
 
 // medianRate returns the median of recent per-second record counts.
@@ -111,19 +128,6 @@ func medianRate(r *int64Ring) int64 {
 	vals := ringValues(r)
 	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
 	return vals[len(vals)/2]
-}
-
-func percentile95(r *int64Ring) (time.Duration, int) {
-	if r == nil || r.count == 0 {
-		return 0, 0
-	}
-	vals := ringValues(r)
-	sort.Slice(vals, func(i, j int) bool { return vals[i] < vals[j] })
-	pos := int(0.95 * float64(len(vals)-1))
-	if pos >= len(vals) {
-		pos = len(vals) - 1
-	}
-	return time.Duration(vals[pos]), len(vals)
 }
 
 func ringValues(r *int64Ring) []int64 {

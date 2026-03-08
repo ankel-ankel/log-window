@@ -488,6 +488,7 @@ func (m *model) readJSONItems(r io.Reader) error {
 				}
 			}
 			prevEvent = eventTime
+			m.metrics.observeEventTime(eventTime)
 			last = m.doSketchTicks(eventTime, last)
 			m.mu.Lock()
 			m.latestTick = last
@@ -555,6 +556,7 @@ func (m *model) readAccessLogItems(r io.Reader) error {
 				}
 			}
 			prevEvent = eventTime
+			m.metrics.observeEventTime(eventTime)
 			last = m.doSketchTicks(eventTime, last)
 			m.mu.Lock()
 			m.latestTick = last
@@ -812,7 +814,6 @@ func (m *model) updateTopKIncremental() {
 			m.sketchMu.Unlock()
 		},
 	)
-	m.metrics.observeTopKRefresh(start)
 	m.mu.Lock()
 	m.listItems = items
 	m.mu.Unlock()
@@ -1004,9 +1005,9 @@ func (m *model) View() string {
 	var statsBlock []string
 	if config.StatsEnabled {
 		snap := m.metrics.snapshot()
-		title := "PERF STATS (RUNNING)"
+		title := "STATS (RUNNING)"
 		if m.isPaused() {
-			title = "PERF STATS (PAUSED)"
+			title = "STATS (PAUSED)"
 		}
 
 		topItem := "-"
@@ -1028,24 +1029,18 @@ func (m *model) View() string {
 				}
 			}
 		}
-		lag := "n/a"
-		if snap.records > 0 {
-			if m.isPaused() {
-				lag = "paused"
-			} else {
-				lag = formatMetricDuration(snap.ingestLag)
-			}
-		}
-
 		statsBlock = []string{
 			title,
 			fmt.Sprintf("records: %d", snap.records),
-			fmt.Sprintf("ingest rate: %d rec/s", snap.ingestRps),
-			fmt.Sprintf("pipeline lag p95: %s", formatMetricDuration(snap.rankLagP95)),
-			fmt.Sprintf("data freshness lag: %s", lag),
+			fmt.Sprintf("throughput: %d rec/s", snap.ingestRps),
+		}
+		if !snap.lastEventTime.IsZero() {
+			statsBlock = append(statsBlock, fmt.Sprintf("replay position: %s", snap.lastEventTime.UTC().Format(time.RFC3339)))
+		}
+		statsBlock = append(statsBlock,
 			fmt.Sprintf("top-1: %s (%d)", topItem, topCount),
 			fmt.Sprintf("track: %s", tracked),
-		}
+		)
 	}
 
 	if len(statsBlock) != 0 {
@@ -1070,13 +1065,6 @@ func emptyPlot(m *model) strings.Builder {
 		sb.WriteRune('\n')
 	}
 	return sb
-}
-
-func formatMetricDuration(d time.Duration) string {
-	if d <= 0 {
-		return "0.000ms"
-	}
-	return fmt.Sprintf("%.3fms", float64(d)/float64(time.Millisecond))
 }
 
 func computePaneWidths(totalWidth int, splitPercent int) (left, right int) {
