@@ -531,7 +531,8 @@ function makeLine(canvasId, series, yLabel) {
         legend: { position: 'top' },
         tooltip: {
           callbacks: {
-            label: c => c.dataset.label + ': ' + Number(c.parsed.y).toFixed(5)
+            title: items => Number(items[0].label).toLocaleString() + ' records',
+            label: c => c.dataset.label + ': ' + Number(c.parsed.y).toFixed(5) + ' ms'
           }
         }
       },
